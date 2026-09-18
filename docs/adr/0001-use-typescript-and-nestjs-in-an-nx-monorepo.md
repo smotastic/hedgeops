@@ -1,13 +1,13 @@
 ---
 number: "0001"
-title: "Use TypeScript and NestJS in an Nx monorepo"
+title: "Use TypeScript and Nx for backend applications"
 status: "Accepted"
 date: "2026-09-18"
 supersedes: null
 superseded_by: null
 ---
 
-# ADR-0001: Use TypeScript and NestJS in an Nx monorepo
+# ADR-0001: Use TypeScript and Nx for backend applications
 
 ## Context
 
@@ -22,8 +22,9 @@ Backend applications and the future frontend will share one
 repository, called a monorepo. A common language will reduce
 the number of languages developers must use.
 
-The backend needs a common application structure. Initial work
-includes ingestion, refining, and automation. An API will follow.
+Initial backend work includes ingestion, refining, and automation.
+Workers do not need an API framework. An API will follow and
+will use common framework conventions.
 These responsibilities do not determine service boundaries.
 
 The hedgehome project supplies device knowledge and proven
@@ -36,10 +37,10 @@ Use the following backend stack:
 - TypeScript with strict type checks.
 - Node.js, the program that executes backend application code,
   on a supported Long-Term Support release.
-- NestJS as the common backend framework.
+- Plain Node.js for workers and NestJS for API applications.
 - pnpm for dependency installation and workspace packages.
 - Nx for repository task management and project dependencies.
-- Official Nx support for NestJS applications.
+- Official Nx support for NestJS API applications.
 
 Use TypeScript for the future frontend as well. This decision
 does not select a frontend framework.
@@ -51,15 +52,15 @@ by a change.
 
 Nx Cloud is optional. Local development must not require it.
 
-Support both workers and API applications with NestJS.
-A worker is a backend program that processes messages or
-performs tasks without waiting for web requests.
+Use plain Node.js for workers. Use NestJS for API applications.
+An API is an interface for other applications.
 
-Workers may run without a web server. Add web endpoints only
-when needed, for example for health checks.
+A worker processes messages and tasks without serving web requests.
+Worker code does not require NestJS.
 
-Use shared NestJS conventions for modules and dependency
-injection, which supplies components with the objects they need.
+Connect worker components through explicit startup code.
+Use NestJS modules and dependency injection for API applications.
+Dependency injection supplies components with the objects they need.
 
 Separate ADRs will define:
 
@@ -78,15 +79,16 @@ delivery merely by selecting NestJS.
 ### Positive
 
 - Backend and frontend developers use one language.
-- Backend applications follow a common structure.
-- Workers and API applications use the same framework.
+- API applications follow common NestJS conventions.
+- Workers do not need an API framework.
 - pnpm links local packages within one repository.
 - Nx coordinates tasks across applications and shared packages.
 - Local operation does not depend on hosted services.
 
 ### Negative
 
-- NestJS adds framework concepts and setup code.
+- NestJS adds framework concepts and setup code to APIs.
+- Worker startup code must connect components explicitly.
 - Nx adds configuration and maintenance work.
 - Compatible Node.js, NestJS, Nx, and pnpm versions must be
   maintained together.
@@ -104,11 +106,17 @@ This follows the broad approach used in hedgehome.
 It was not selected because HedgeOps wants one application
 language across backend and frontend.
 
-### TypeScript with smaller libraries instead of NestJS
+### NestJS for all backend applications
 
-This can reduce framework setup and give each application
-more freedom. It was not selected because a common backend
-structure is preferred over separate application conventions.
+This would give workers and APIs the same framework conventions.
+It was not selected because workers do not need NestJS.
+Explicit startup code can connect their components.
+
+### TypeScript with smaller libraries for APIs
+
+This can reduce framework setup and give each API application
+more freedom. It was not selected because common NestJS
+conventions are preferred for APIs.
 
 ### pnpm workspaces without Nx
 
