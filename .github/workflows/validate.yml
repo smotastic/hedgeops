@@ -1,0 +1,185 @@
+name: Validate repository
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate repository files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check changed lines
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            git diff --check "$BASE_SHA" "$HEAD_SHA"
+          elif [[ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            git diff --check "$BEFORE_SHA" "$HEAD_SHA"
+          elif git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
+            git diff --check "${HEAD_SHA}^" "$HEAD_SHA"
+          else
+            git show --check --oneline "$HEAD_SHA"
+          fi
+
+      - name: Validate Markdown, skills, ADRs, and secrets
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          from urllib.parse import unquote
+          import re
+          import sys
+
+          root = Path.cwd()
+          errors = []
+
+          def add(path, line, message):
+              location = f"{path}:{line}" if line else str(path)
+              errors.append(f"{location}: {message}")
+
+          def parse_frontmatter(text):
+              if not text.startswith("---\n"):
+                  return None
+              end = text.find("\n---\n", 4)
+              if end == -1:
+                  return None
+              fields = {}
+              for line in text[4:end].splitlines():
+                  match = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+                  if match:
+                      value = match.group(2).strip()
+                      for quote in ("'", '"'):
+                          if value.startswith(quote) and value.endswith(quote):
+                              value = value[1:-1]
+                              break
+                      fields[match.group(1)] = value
+              return fields
+
+          # Check local Markdown links. External links are intentionally skipped.
+          link_pattern = re.compile(r"(?<!!)\[[^]]*\]\(([^)]+)\)")
+          for path in root.rglob("*.md"):
+              if ".git" in path.parts:
+                  continue
+              fenced = False
+              for line_number, line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
+                  if re.match(r"^\s*(```|~~~)", line):
+                      fenced = not fenced
+                      continue
+                  if fenced:
+                      continue
+                  for match in link_pattern.finditer(line):
+                      target = match.group(1).strip().split()[0].strip("<>")
+                      if target.startswith(("http://", "https://", "mailto:", "tel:", "#")):
+                          continue
+                      target = unquote(target.split("#", 1)[0])
+                      if target and not (path.parent / target).resolve().exists():
+                          add(path, line_number, f"broken local link: {target}")
+
+          # Check skill frontmatter and directory names.
+          for path in root.glob(".agents/skills/**/SKILL.md"):
+              text = path.read_text(errors="ignore")
+              fields = parse_frontmatter(text)
+              if fields is None:
+                  add(path, 1, "missing or invalid frontmatter")
+                  continue
+              if not fields.get("name"):
+                  add(path, 1, "frontmatter needs a name")
+              elif fields["name"] != path.parent.name:
+                  add(path, 1, "frontmatter name must match the skill directory")
+              if not fields.get("description"):
+                  add(path, 1, "frontmatter needs a description")
+
+          # Check ADR names, frontmatter, headings, and supersession references.
+          adr_dir = root / "docs" / "adr"
+          adr_files = sorted(adr_dir.glob("*.md")) if adr_dir.exists() else []
+          adr_numbers = {}
+          parsed_adrs = []
+          name_pattern = re.compile(r"^(\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
+          allowed_statuses = {"Proposed", "Accepted", "Rejected", "Deprecated", "Superseded"}
+
+          for path in adr_files:
+              match = name_pattern.match(path.name)
+              if not match:
+                  add(path, 1, "ADR file name must use 4 digits and lowercase kebab-case")
+                  continue
+              number = match.group(1)
+              if number in adr_numbers:
+                  add(path, 1, f"duplicate ADR number; already used by {adr_numbers[number]}")
+              adr_numbers[number] = path
+              text = path.read_text(errors="ignore")
+              fields = parse_frontmatter(text)
+              parsed_adrs.append((path, number, fields, text))
+              if fields is None:
+                  add(path, 1, "missing or invalid frontmatter")
+                  continue
+              for field in ("number", "title", "status", "date"):
+                  if not fields.get(field):
+                      add(path, 1, f"frontmatter needs {field}")
+              if fields.get("number") and fields["number"] != number:
+                  add(path, 1, "frontmatter number must match the file name")
+              if fields.get("status") and fields["status"] not in allowed_statuses:
+                  add(path, 1, f"invalid ADR status: {fields['status']}")
+              if not re.search(rf"^# ADR-{number}:", text, re.MULTILINE):
+                  add(path, 1, "heading must start with the ADR number")
+              for heading in ("Context", "Decision", "Consequences", "Alternatives considered"):
+                  if not re.search(rf"^## {re.escape(heading)}\s*$", text, re.MULTILINE):
+                      add(path, 1, f"missing required section: {heading}")
+              for field in ("supersedes", "superseded_by"):
+                  value = fields.get(field, "") if fields else ""
+                  if value and value not in {"null", "~"} and not re.fullmatch(r"\d{4}", value):
+                      add(path, 1, f"{field} must be a 4-digit ADR number or null")
+
+          for path, number, fields, _ in parsed_adrs:
+              if not fields:
+                  continue
+              for field in ("supersedes", "superseded_by"):
+                  value = fields.get(field, "")
+                  if value and value not in {"null", "~"} and value not in adr_numbers:
+                      add(path, 1, f"{field} points to missing ADR {value}")
+
+          # Scan text files for common credential forms.
+          secret_patterns = [
+              re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+              re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+              re.compile(r"\b(?:gh[pousr]|github_pat_)[A-Za-z0-9_]{20,}\b"),
+              re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
+              re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+              re.compile(r"(?i)\b(?:api[_-]?key|access[_-]?token|secret[_-]?key)\b\s*[:=]\s*['\"][A-Za-z0-9_./+=-]{20,}['\"]"),
+          ]
+          ignored_parts = {".git", "node_modules", ".venv", "venv"}
+          for path in root.rglob("*"):
+              if not path.is_file() or ignored_parts.intersection(path.parts):
+                  continue
+              try:
+                  text = path.read_text()
+              except (UnicodeDecodeError, OSError):
+                  continue
+              for line_number, line in enumerate(text.splitlines(), 1):
+                  if any(pattern.search(line) for pattern in secret_patterns):
+                      add(path, line_number, "possible credential found")
+
+          if errors:
+              print("\n".join(errors))
+              sys.exit(1)
+          print("Repository validation passed.")
+          PY
